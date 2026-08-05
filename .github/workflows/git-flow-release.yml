@@ -1,4 +1,4 @@
-name: Git Flow Release
+name: Git Flow Automation
 
 on:
   pull_request:
@@ -6,6 +6,7 @@ on:
       - closed
     branches:
       - develop
+      - main
 
 permissions:
   contents: write
@@ -16,6 +17,7 @@ jobs:
     name: Create release branch and PR
     if: >
       github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref == 'develop' &&
       startsWith(github.event.pull_request.head.ref, 'feature/')
     runs-on: ubuntu-latest
 
@@ -116,3 +118,109 @@ jobs:
             });
 
             core.info(`Release PR criado: #${createdPull.data.number}`);
+
+  create-merge-back-from-hotfix:
+    name: Create merge back PR to develop
+    if: >
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref == 'main' &&
+      startsWith(github.event.pull_request.head.ref, 'hotfix/')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Prepare merge back metadata
+        id: merge_back
+        shell: bash
+        env:
+          HOTFIX_BRANCH: ${{ github.event.pull_request.head.ref }}
+          HOTFIX_PR_NUMBER: ${{ github.event.pull_request.number }}
+          HOTFIX_PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          hotfix_branch="$HOTFIX_BRANCH"
+          hotfix_name="${hotfix_branch#hotfix/}"
+          safe_name="$(echo "$hotfix_name" \
+            | tr '[:upper:] ' '[:lower:]-' \
+            | sed -E 's/[^a-z0-9._-]+/-/g; s/-+/-/g; s/^-//; s/-$//')"
+
+          if [ -z "$safe_name" ]; then
+            safe_name="hotfix-$HOTFIX_PR_NUMBER"
+          fi
+
+          {
+            echo "hotfix_name=$hotfix_name"
+            echo "merge_back_branch=merge-back/$safe_name"
+            echo "merge_back_title=Merge back: $HOTFIX_PR_TITLE"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create or update merge back branch
+        shell: bash
+        run: |
+          merge_back_branch="${{ steps.merge_back.outputs.merge_back_branch }}"
+
+          git fetch origin "+refs/heads/main:refs/remotes/origin/main"
+
+          if git ls-remote --exit-code --heads origin "$merge_back_branch" >/dev/null 2>&1; then
+            git fetch origin "+refs/heads/$merge_back_branch:refs/remotes/origin/$merge_back_branch"
+            git checkout -B "$merge_back_branch" "origin/$merge_back_branch"
+            git merge --no-edit origin/main
+          else
+            git checkout -b "$merge_back_branch" origin/main
+          fi
+
+          git push origin "$merge_back_branch"
+
+      - name: Create or update merge back PR to develop
+        uses: actions/github-script@v7
+        env:
+          MERGE_BACK_BRANCH: ${{ steps.merge_back.outputs.merge_back_branch }}
+          MERGE_BACK_TITLE: ${{ steps.merge_back.outputs.merge_back_title }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const mergeBackBranch = process.env.MERGE_BACK_BRANCH;
+            const mergeBackTitle = process.env.MERGE_BACK_TITLE;
+            const hotfixPr = context.payload.pull_request;
+            const body = hotfixPr.body || `Merge back criado a partir do hotfix ${hotfixPr.head.ref}.`;
+
+            const existingPulls = await github.rest.pulls.list({
+              owner,
+              repo,
+              state: 'open',
+              base: 'develop',
+              head: `${owner}:${mergeBackBranch}`,
+            });
+
+            if (existingPulls.data.length > 0) {
+              await github.rest.pulls.update({
+                owner,
+                repo,
+                pull_number: existingPulls.data[0].number,
+                title: mergeBackTitle,
+                body,
+              });
+
+              core.info(`Merge back PR atualizado: #${existingPulls.data[0].number}`);
+              return;
+            }
+
+            const createdPull = await github.rest.pulls.create({
+              owner,
+              repo,
+              title: mergeBackTitle,
+              body,
+              head: mergeBackBranch,
+              base: 'develop',
+            });
+
+            core.info(`Merge back PR criado: #${createdPull.data.number}`);
