@@ -296,10 +296,25 @@ jobs:
               per_page: 100,
             });
 
-            const activeReleasePr = pulls
+            const releaseBranchPattern = /^release\/\d+\.\d+\.\d+$/;
+            const activeReleasePulls = pulls
               .filter((pull) => pull.head.repo?.full_name === `${owner}/${repo}`)
-              .filter((pull) => pull.head.ref.startsWith('release/'))
-              .sort((a, b) => b.number - a.number)[0];
+              .filter((pull) => releaseBranchPattern.test(pull.head.ref))
+              .sort((a, b) => b.number - a.number);
+
+            if (activeReleasePulls.length > 1) {
+              const activeReleaseList = activeReleasePulls
+                .map((pull) => `${pull.head.ref} (#${pull.number})`)
+                .join(', ');
+
+              core.setFailed(
+                `More than one active release was found: ${activeReleaseList}. ` +
+                'Close or finish the active release before starting another one.'
+              );
+              return;
+            }
+
+            const activeReleasePr = activeReleasePulls[0];
 
             if (activeReleasePr) {
               core.setOutput('base_branch', activeReleasePr.head.ref);
