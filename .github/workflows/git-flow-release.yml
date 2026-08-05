@@ -72,7 +72,7 @@ jobs:
 
           git push origin "$release_branch"
 
-      - name: Create or update release PR to master
+      - name: Create or update release PR to main
         uses: actions/github-script@v7
         env:
           RELEASE_BRANCH: ${{ steps.release.outputs.release_branch }}
@@ -89,7 +89,7 @@ jobs:
               owner,
               repo,
               state: 'open',
-              base: 'master',
+              base: 'main',
               head: `${owner}:${releaseBranch}`,
             });
 
@@ -112,7 +112,7 @@ jobs:
               title: releaseTitle,
               body,
               head: releaseBranch,
-              base: 'master',
+              base: 'main',
             });
 
             core.info(`Release PR criado: #${createdPull.data.number}`);
