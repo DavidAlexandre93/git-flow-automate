@@ -49,6 +49,42 @@ jobs:
             echo "title=Release: $version"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Ensure no other active release exists
+        uses: actions/github-script@v7
+        env:
+          RELEASE_BRANCH: ${{ steps.release.outputs.branch }}
+        with:
+          github-token: ${{ secrets.RELEASE_BOT_TOKEN || github.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const releaseBranch = process.env.RELEASE_BRANCH;
+            const releaseBranchPattern = /^release\/\d+\.\d+\.\d+$/;
+
+            const pulls = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: 'open',
+              base: 'main',
+              per_page: 100,
+            });
+
+            const activeReleasePulls = pulls
+              .filter((pull) => pull.head.repo?.full_name === `${owner}/${repo}`)
+              .filter((pull) => releaseBranchPattern.test(pull.head.ref));
+
+            const otherActiveRelease = activeReleasePulls
+              .find((pull) => pull.head.ref !== releaseBranch);
+
+            if (otherActiveRelease) {
+              core.setFailed(
+                `Active release ${otherActiveRelease.head.ref} is already open in PR #${otherActiveRelease.number}. ` +
+                `Close or finish it before starting ${releaseBranch}.`
+              );
+              return;
+            }
+
+            core.info('No other active release found.');
+
       - name: Create release branch
         shell: bash
         run: |
