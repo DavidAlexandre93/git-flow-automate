@@ -7,6 +7,11 @@ on:
         description: Release version to cut from develop, for example 1.4.0
         required: true
         type: string
+  pull_request:
+    types:
+      - closed
+    branches:
+      - develop
 
 permissions:
   contents: write
@@ -15,6 +20,17 @@ permissions:
 jobs:
   start-release:
     name: Start release
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.merged == true &&
+        github.event.pull_request.base.ref == 'develop' &&
+        (
+          startsWith(github.event.pull_request.head.ref, 'feature/') ||
+          startsWith(github.event.pull_request.head.ref, 'bugfix/')
+        )
+      )
     runs-on: ubuntu-latest
 
     steps:
@@ -34,12 +50,18 @@ jobs:
         id: release
         shell: bash
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || '' }}
         run: |
           version="$(echo "$VERSION" | tr -d '[:space:]')"
 
+          if [ -z "$version" ]; then
+            version="$(grep -Eo 'v?[0-9]+\.[0-9]+\.[0-9]+' README.md \
+              | head -n 1 \
+              | sed 's/^v//')"
+          fi
+
           if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Version must use the X.Y.Z format, for example 1.4.0."
+            echo "::error::Version must use the X.Y.Z format, for example 1.4.0. For automatic releases, README.md must contain a version like v1.4.0."
             exit 1
           fi
 
