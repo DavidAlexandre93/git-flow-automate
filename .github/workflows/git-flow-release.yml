@@ -13,12 +13,15 @@ permissions:
   pull-requests: write
 
 jobs:
-  create-release-from-feature:
+  create-release-from-develop-merge:
     name: Create release branch and PR
     if: >
       github.event.pull_request.merged == true &&
       github.event.pull_request.base.ref == 'develop' &&
-      startsWith(github.event.pull_request.head.ref, 'feature/')
+      (
+        startsWith(github.event.pull_request.head.ref, 'feature/') ||
+        startsWith(github.event.pull_request.head.ref, 'bugfix/')
+      )
     runs-on: ubuntu-latest
 
     steps:
@@ -37,24 +40,30 @@ jobs:
         id: release
         shell: bash
         env:
-          FEATURE_BRANCH: ${{ github.event.pull_request.head.ref }}
-          FEATURE_PR_NUMBER: ${{ github.event.pull_request.number }}
-          FEATURE_PR_TITLE: ${{ github.event.pull_request.title }}
+          SOURCE_BRANCH: ${{ github.event.pull_request.head.ref }}
+          SOURCE_PR_NUMBER: ${{ github.event.pull_request.number }}
+          SOURCE_PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          feature_branch="$FEATURE_BRANCH"
-          feature_name="${feature_branch#feature/}"
-          safe_name="$(echo "$feature_name" \
+          source_branch="$SOURCE_BRANCH"
+          source_type="${source_branch%%/*}"
+          source_name="${source_branch#*/}"
+
+          if [ "$source_name" = "$source_branch" ]; then
+            source_name="$source_branch"
+          fi
+
+          safe_name="$(echo "$source_name" \
             | tr '[:upper:] ' '[:lower:]-' \
             | sed -E 's/[^a-z0-9._-]+/-/g; s/-+/-/g; s/^-//; s/-$//')"
 
           if [ -z "$safe_name" ]; then
-            safe_name="feature-$FEATURE_PR_NUMBER"
+            safe_name="$source_type-$SOURCE_PR_NUMBER"
           fi
 
           {
-            echo "feature_name=$feature_name"
+            echo "source_name=$source_name"
             echo "release_branch=release/$safe_name"
-            echo "release_title=Release: $FEATURE_PR_TITLE"
+            echo "release_title=Release: $SOURCE_PR_TITLE"
           } >> "$GITHUB_OUTPUT"
 
       - name: Create or update release branch
@@ -84,8 +93,8 @@ jobs:
             const { owner, repo } = context.repo;
             const releaseBranch = process.env.RELEASE_BRANCH;
             const releaseTitle = process.env.RELEASE_TITLE;
-            const featurePr = context.payload.pull_request;
-            const body = featurePr.body || `Release criada a partir da feature ${featurePr.head.ref}.`;
+            const sourcePr = context.payload.pull_request;
+            const body = sourcePr.body || `Release criada a partir de ${sourcePr.head.ref}.`;
 
             const existingPulls = await github.rest.pulls.list({
               owner,
