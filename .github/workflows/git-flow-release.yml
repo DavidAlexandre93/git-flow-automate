@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   create-release-from-develop-merge:
-    name: Create release branch and PR
+    name: Create ${{ matrix.title_prefix }} branch and PR
     if: >
       github.event.pull_request.merged == true &&
       github.event.pull_request.base.ref == 'develop' &&
@@ -23,6 +23,16 @@ jobs:
         startsWith(github.event.pull_request.head.ref, 'bugfix/')
       )
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - branch_prefix: release
+            title_prefix: Release
+            fallback_message: Release criada
+          - branch_prefix: release-candidate
+            title_prefix: Release Candidate
+            fallback_message: Release candidate criada
 
     steps:
       - name: Checkout develop
@@ -43,6 +53,8 @@ jobs:
           SOURCE_BRANCH: ${{ github.event.pull_request.head.ref }}
           SOURCE_PR_NUMBER: ${{ github.event.pull_request.number }}
           SOURCE_PR_TITLE: ${{ github.event.pull_request.title }}
+          TARGET_BRANCH_PREFIX: ${{ matrix.branch_prefix }}
+          TARGET_TITLE_PREFIX: ${{ matrix.title_prefix }}
         run: |
           source_branch="$SOURCE_BRANCH"
           source_type="${source_branch%%/*}"
@@ -62,46 +74,48 @@ jobs:
 
           {
             echo "source_name=$source_name"
-            echo "release_branch=release/$safe_name"
-            echo "release_title=Release: $SOURCE_PR_TITLE"
+            echo "target_branch=$TARGET_BRANCH_PREFIX/$safe_name"
+            echo "target_title=$TARGET_TITLE_PREFIX: $SOURCE_PR_TITLE"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Create or update release branch
+      - name: Create or update ${{ matrix.title_prefix }} branch
         shell: bash
         run: |
-          release_branch="${{ steps.release.outputs.release_branch }}"
+          target_branch="${{ steps.release.outputs.target_branch }}"
 
           git fetch origin "+refs/heads/develop:refs/remotes/origin/develop"
 
-          if git ls-remote --exit-code --heads origin "$release_branch" >/dev/null 2>&1; then
-            git fetch origin "+refs/heads/$release_branch:refs/remotes/origin/$release_branch"
-            git checkout -B "$release_branch" "origin/$release_branch"
+          if git ls-remote --exit-code --heads origin "$target_branch" >/dev/null 2>&1; then
+            git fetch origin "+refs/heads/$target_branch:refs/remotes/origin/$target_branch"
+            git checkout -B "$target_branch" "origin/$target_branch"
             git merge --no-edit origin/develop
           else
-            git checkout -b "$release_branch" origin/develop
+            git checkout -b "$target_branch" origin/develop
           fi
 
-          git push origin "$release_branch"
+          git push origin "$target_branch"
 
-      - name: Create or update release PR to main
+      - name: Create or update ${{ matrix.title_prefix }} PR to main
         uses: actions/github-script@v7
         env:
-          RELEASE_BRANCH: ${{ steps.release.outputs.release_branch }}
-          RELEASE_TITLE: ${{ steps.release.outputs.release_title }}
+          TARGET_BRANCH: ${{ steps.release.outputs.target_branch }}
+          TARGET_TITLE: ${{ steps.release.outputs.target_title }}
+          FALLBACK_MESSAGE: ${{ matrix.fallback_message }}
         with:
           script: |
             const { owner, repo } = context.repo;
-            const releaseBranch = process.env.RELEASE_BRANCH;
-            const releaseTitle = process.env.RELEASE_TITLE;
+            const targetBranch = process.env.TARGET_BRANCH;
+            const targetTitle = process.env.TARGET_TITLE;
+            const fallbackMessage = process.env.FALLBACK_MESSAGE;
             const sourcePr = context.payload.pull_request;
-            const body = sourcePr.body || `Release criada a partir de ${sourcePr.head.ref}.`;
+            const body = sourcePr.body || `${fallbackMessage} a partir de ${sourcePr.head.ref}.`;
 
             const existingPulls = await github.rest.pulls.list({
               owner,
               repo,
               state: 'open',
               base: 'main',
-              head: `${owner}:${releaseBranch}`,
+              head: `${owner}:${targetBranch}`,
             });
 
             if (existingPulls.data.length > 0) {
@@ -109,24 +123,24 @@ jobs:
                 owner,
                 repo,
                 pull_number: existingPulls.data[0].number,
-                title: releaseTitle,
+                title: targetTitle,
                 body,
               });
 
-              core.info(`Release PR atualizado: #${existingPulls.data[0].number}`);
+              core.info(`${targetTitle} PR atualizado: #${existingPulls.data[0].number}`);
               return;
             }
 
             const createdPull = await github.rest.pulls.create({
               owner,
               repo,
-              title: releaseTitle,
+              title: targetTitle,
               body,
-              head: releaseBranch,
+              head: targetBranch,
               base: 'main',
             });
 
-            core.info(`Release PR criado: #${createdPull.data.number}`);
+            core.info(`${targetTitle} PR criado: #${createdPull.data.number}`);
 
   create-merge-back-from-hotfix:
     name: Create merge back PR to develop
