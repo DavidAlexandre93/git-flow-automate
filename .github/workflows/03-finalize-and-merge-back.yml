@@ -1,0 +1,397 @@
+name: 03 - Finalize and Merge Back
+
+on:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  finalize-release:
+    name: Finalize release
+    if: >
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'release/')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_BOT_TOKEN || github.token }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Prepare release metadata
+        id: release
+        shell: bash
+        env:
+          RELEASE_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          version="${RELEASE_BRANCH#release/}"
+
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release branch must use release/X.Y.Z, for example release/1.4.0."
+            exit 1
+          fi
+
+          {
+            echo "version=$version"
+            echo "tag=v$version"
+            echo "merge_back_branch=merge-back/release-$version"
+            echo "merge_back_title=Merge back: Release $version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create final release tag
+        shell: bash
+        run: |
+          final_tag="${{ steps.release.outputs.tag }}"
+
+          git fetch origin "+refs/heads/main:refs/remotes/origin/main"
+          git checkout -B main origin/main
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$final_tag" >/dev/null 2>&1; then
+            echo "::notice::Tag $final_tag already exists and will not be moved."
+          else
+            git tag -a "$final_tag" -m "Release $final_tag"
+            git push origin "$final_tag"
+          fi
+
+      - name: Create or update GitHub release
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.RELEASE_BOT_TOKEN || github.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const version = '${{ steps.release.outputs.version }}';
+            const finalTag = '${{ steps.release.outputs.tag }}';
+            const sourcePr = context.payload.pull_request;
+            const name = `Release ${finalTag}`;
+            const body = sourcePr.body || `Release ${version} finalized from ${sourcePr.head.ref}.`;
+
+            try {
+              const existingRelease = await github.rest.repos.getReleaseByTag({
+                owner,
+                repo,
+                tag: finalTag,
+              });
+
+              await github.rest.repos.updateRelease({
+                owner,
+                repo,
+                release_id: existingRelease.data.id,
+                name,
+                body,
+                prerelease: false,
+                draft: false,
+              });
+
+              core.info(`GitHub release updated: ${finalTag}`);
+            } catch (error) {
+              if (error.status !== 404) {
+                throw error;
+              }
+
+              await github.rest.repos.createRelease({
+                owner,
+                repo,
+                tag_name: finalTag,
+                target_commitish: 'main',
+                name,
+                body,
+                prerelease: false,
+                draft: false,
+              });
+
+              core.info(`GitHub release created: ${finalTag}`);
+            }
+
+      - name: Create or update merge back branch
+        shell: bash
+        run: |
+          merge_back_branch="${{ steps.release.outputs.merge_back_branch }}"
+
+          git fetch origin \
+            "+refs/heads/main:refs/remotes/origin/main" \
+            "+refs/heads/develop:refs/remotes/origin/develop"
+
+          if git ls-remote --exit-code --heads origin "$merge_back_branch" >/dev/null 2>&1; then
+            git fetch origin "+refs/heads/$merge_back_branch:refs/remotes/origin/$merge_back_branch"
+            git checkout -B "$merge_back_branch" "origin/$merge_back_branch"
+          else
+            git checkout -b "$merge_back_branch" origin/develop
+          fi
+
+          git merge --no-edit origin/main
+          git push origin "$merge_back_branch"
+
+      - name: Create or update merge back PR to develop
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.RELEASE_BOT_TOKEN || github.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const mergeBackBranch = '${{ steps.release.outputs.merge_back_branch }}';
+            const title = '${{ steps.release.outputs.merge_back_title }}';
+            const sourcePr = context.payload.pull_request;
+            const body = sourcePr.body || `Merge back created from ${sourcePr.head.ref}.`;
+
+            const existingPulls = await github.rest.pulls.list({
+              owner,
+              repo,
+              state: 'open',
+              base: 'develop',
+              head: `${owner}:${mergeBackBranch}`,
+            });
+
+            if (existingPulls.data.length > 0) {
+              await github.rest.pulls.update({
+                owner,
+                repo,
+                pull_number: existingPulls.data[0].number,
+                title,
+                body,
+              });
+
+              core.info(`Release merge back PR updated: #${existingPulls.data[0].number}`);
+              return;
+            }
+
+            const createdPull = await github.rest.pulls.create({
+              owner,
+              repo,
+              title,
+              body,
+              head: mergeBackBranch,
+              base: 'develop',
+            });
+
+            core.info(`Release merge back PR created: #${createdPull.data.number}`);
+
+  finalize-hotfix:
+    name: Finalize hotfix
+    if: >
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'hotfix/')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_BOT_TOKEN || github.token }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Prepare hotfix metadata
+        id: hotfix
+        shell: bash
+        env:
+          HOTFIX_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          version="${HOTFIX_BRANCH#hotfix/}"
+
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Hotfix branch must use hotfix/X.Y.Z, for example hotfix/1.4.1."
+            exit 1
+          fi
+
+          {
+            echo "version=$version"
+            echo "safe_name=$version"
+            echo "tag=v$version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create hotfix tag
+        shell: bash
+        run: |
+          hotfix_tag="${{ steps.hotfix.outputs.tag }}"
+
+          git fetch origin "+refs/heads/main:refs/remotes/origin/main"
+          git checkout -B main origin/main
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$hotfix_tag" >/dev/null 2>&1; then
+            echo "::notice::Tag $hotfix_tag already exists and will not be moved."
+          else
+            git tag -a "$hotfix_tag" -m "Hotfix $hotfix_tag"
+            git push origin "$hotfix_tag"
+          fi
+
+      - name: Create or update GitHub hotfix release
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.RELEASE_BOT_TOKEN || github.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const version = '${{ steps.hotfix.outputs.version }}';
+            const hotfixTag = '${{ steps.hotfix.outputs.tag }}';
+            const sourcePr = context.payload.pull_request;
+            const name = `Hotfix ${hotfixTag}`;
+            const body = sourcePr.body || `Hotfix ${version} finalized from ${sourcePr.head.ref}.`;
+
+            try {
+              const existingRelease = await github.rest.repos.getReleaseByTag({
+                owner,
+                repo,
+                tag: hotfixTag,
+              });
+
+              await github.rest.repos.updateRelease({
+                owner,
+                repo,
+                release_id: existingRelease.data.id,
+                name,
+                body,
+                prerelease: false,
+                draft: false,
+              });
+
+              core.info(`GitHub hotfix release updated: ${hotfixTag}`);
+            } catch (error) {
+              if (error.status !== 404) {
+                throw error;
+              }
+
+              await github.rest.repos.createRelease({
+                owner,
+                repo,
+                tag_name: hotfixTag,
+                target_commitish: 'main',
+                name,
+                body,
+                prerelease: false,
+                draft: false,
+              });
+
+              core.info(`GitHub hotfix release created: ${hotfixTag}`);
+            }
+
+      - name: Find hotfix merge back target
+        id: hotfix_target
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.RELEASE_BOT_TOKEN || github.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const pulls = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: 'open',
+              base: 'main',
+              per_page: 100,
+            });
+
+            const activeReleasePr = pulls
+              .filter((pull) => pull.head.repo?.full_name === `${owner}/${repo}`)
+              .filter((pull) => pull.head.ref.startsWith('release/'))
+              .sort((a, b) => b.number - a.number)[0];
+
+            if (activeReleasePr) {
+              core.setOutput('base_branch', activeReleasePr.head.ref);
+              core.setOutput('target_kind', 'release');
+              core.info(`Active release found: ${activeReleasePr.head.ref}`);
+              return;
+            }
+
+            core.setOutput('base_branch', 'develop');
+            core.setOutput('target_kind', 'develop');
+            core.info('No active release found. Hotfix will be merged back into develop.');
+
+      - name: Create or update hotfix merge back branch
+        id: merge_back
+        shell: bash
+        env:
+          HOTFIX_VERSION: ${{ steps.hotfix.outputs.version }}
+          HOTFIX_SAFE_NAME: ${{ steps.hotfix.outputs.safe_name }}
+          TARGET_BASE: ${{ steps.hotfix_target.outputs.base_branch }}
+          TARGET_KIND: ${{ steps.hotfix_target.outputs.target_kind }}
+        run: |
+          safe_target="$(echo "$TARGET_BASE" \
+            | tr '[:upper:] ' '[:lower:]-' \
+            | sed -E 's/[^a-z0-9._-]+/-/g; s/-+/-/g; s/^-//; s/-$//')"
+
+          if [ "$TARGET_KIND" = "release" ]; then
+            merge_back_branch="merge-back/hotfix-$HOTFIX_SAFE_NAME-to-$safe_target"
+            merge_back_title="Merge back: Hotfix $HOTFIX_VERSION into $TARGET_BASE"
+          else
+            merge_back_branch="merge-back/hotfix-$HOTFIX_SAFE_NAME-to-develop"
+            merge_back_title="Merge back: Hotfix $HOTFIX_VERSION"
+          fi
+
+          {
+            echo "branch=$merge_back_branch"
+            echo "title=$merge_back_title"
+          } >> "$GITHUB_OUTPUT"
+
+          git fetch origin \
+            "+refs/heads/main:refs/remotes/origin/main" \
+            "+refs/heads/$TARGET_BASE:refs/remotes/origin/$TARGET_BASE"
+
+          if git ls-remote --exit-code --heads origin "$merge_back_branch" >/dev/null 2>&1; then
+            git fetch origin "+refs/heads/$merge_back_branch:refs/remotes/origin/$merge_back_branch"
+            git checkout -B "$merge_back_branch" "origin/$merge_back_branch"
+          else
+            git checkout -b "$merge_back_branch" "origin/$TARGET_BASE"
+          fi
+
+          git merge --no-edit origin/main
+          git push origin "$merge_back_branch"
+
+      - name: Create or update hotfix merge back PR
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.RELEASE_BOT_TOKEN || github.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const mergeBackBranch = '${{ steps.merge_back.outputs.branch }}';
+            const title = '${{ steps.merge_back.outputs.title }}';
+            const targetBase = '${{ steps.hotfix_target.outputs.base_branch }}';
+            const sourcePr = context.payload.pull_request;
+            const body = sourcePr.body || `Merge back created from ${sourcePr.head.ref}.`;
+
+            const existingPulls = await github.rest.pulls.list({
+              owner,
+              repo,
+              state: 'open',
+              base: targetBase,
+              head: `${owner}:${mergeBackBranch}`,
+            });
+
+            if (existingPulls.data.length > 0) {
+              await github.rest.pulls.update({
+                owner,
+                repo,
+                pull_number: existingPulls.data[0].number,
+                title,
+                body,
+              });
+
+              core.info(`Hotfix merge back PR updated: #${existingPulls.data[0].number}`);
+              return;
+            }
+
+            const createdPull = await github.rest.pulls.create({
+              owner,
+              repo,
+              title,
+              body,
+              head: mergeBackBranch,
+              base: targetBase,
+            });
+
+            core.info(`Hotfix merge back PR created: #${createdPull.data.number}`);
