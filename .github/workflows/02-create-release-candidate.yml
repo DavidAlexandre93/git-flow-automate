@@ -1,0 +1,145 @@
+name: 02 - Create Release Candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version, for example 1.4.0
+        required: true
+        type: string
+      rc_number:
+        description: Release candidate number, for example 1
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  create-release-candidate:
+    name: Create release candidate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_BOT_TOKEN || github.token }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Prepare release candidate metadata
+        id: rc
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          RC_NUMBER: ${{ inputs.rc_number }}
+        run: |
+          version="$(echo "$VERSION" | tr -d '[:space:]')"
+          rc_number="$(echo "$RC_NUMBER" | tr -d '[:space:]')"
+
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version must use the X.Y.Z format, for example 1.4.0."
+            exit 1
+          fi
+
+          if ! [[ "$rc_number" =~ ^[0-9]+$ ]]; then
+            echo "::error::Release candidate number must be an integer, for example 1."
+            exit 1
+          fi
+
+          {
+            echo "version=$version"
+            echo "number=$rc_number"
+            echo "branch=release/$version"
+            echo "tag=v$version-rc.$rc_number"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout release branch
+        id: tag_status
+        shell: bash
+        run: |
+          release_branch="${{ steps.rc.outputs.branch }}"
+          rc_tag="${{ steps.rc.outputs.tag }}"
+
+          if ! git ls-remote --exit-code --heads origin "$release_branch" >/dev/null 2>&1; then
+            echo "::error::Release branch $release_branch does not exist."
+            exit 1
+          fi
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$rc_tag" >/dev/null 2>&1; then
+            echo "::notice::Tag $rc_tag already exists and will not be moved."
+            echo "tag_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag_exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          git fetch origin "+refs/heads/$release_branch:refs/remotes/origin/$release_branch"
+          git checkout -B "$release_branch" "origin/$release_branch"
+
+      - name: Create release candidate tag
+        if: steps.tag_status.outputs.tag_exists != 'true'
+        shell: bash
+        run: |
+          rc_tag="${{ steps.rc.outputs.tag }}"
+
+          git tag -a "$rc_tag" -m "Release candidate $rc_tag"
+          git push origin "$rc_tag"
+
+      - name: Create or update GitHub pre-release
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.RELEASE_BOT_TOKEN || github.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const version = '${{ steps.rc.outputs.version }}';
+            const rcNumber = '${{ steps.rc.outputs.number }}';
+            const releaseBranch = '${{ steps.rc.outputs.branch }}';
+            const rcTag = '${{ steps.rc.outputs.tag }}';
+            const name = `Release Candidate ${rcTag}`;
+            const body = [
+              `Release candidate ${rcNumber} for version ${version}.`,
+              '',
+              `Source branch: ${releaseBranch}`
+            ].join('\n');
+
+            try {
+              const existingRelease = await github.rest.repos.getReleaseByTag({
+                owner,
+                repo,
+                tag: rcTag,
+              });
+
+              await github.rest.repos.updateRelease({
+                owner,
+                repo,
+                release_id: existingRelease.data.id,
+                name,
+                body,
+                prerelease: true,
+                draft: false,
+              });
+
+              core.info(`Pre-release updated: ${rcTag}`);
+            } catch (error) {
+              if (error.status !== 404) {
+                throw error;
+              }
+
+              await github.rest.repos.createRelease({
+                owner,
+                repo,
+                tag_name: rcTag,
+                target_commitish: releaseBranch,
+                name,
+                body,
+                prerelease: true,
+                draft: false,
+              });
+
+              core.info(`Pre-release created: ${rcTag}`);
+            }
