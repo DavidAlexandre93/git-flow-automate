@@ -3,10 +3,15 @@ name: 01 - Start Release
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: Release version to cut from develop, for example 1.4.0
+      release_name:
+        description: Release branch description, for example login-flow
         required: true
         type: string
+  pull_request:
+    types:
+      - closed
+    branches:
+      - develop
 
 permissions:
   contents: write
@@ -15,6 +20,17 @@ permissions:
 jobs:
   start-release:
     name: Start release
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.merged == true &&
+        github.event.pull_request.base.ref == 'develop' &&
+        (
+          startsWith(github.event.pull_request.head.ref, 'feature/') ||
+          startsWith(github.event.pull_request.head.ref, 'bugfix/')
+        )
+      )
     runs-on: ubuntu-latest
 
     steps:
@@ -34,19 +50,33 @@ jobs:
         id: release
         shell: bash
         env:
-          VERSION: ${{ inputs.version }}
+          RELEASE_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.release_name || '' }}
+          SOURCE_BRANCH: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || '' }}
+          SOURCE_TITLE: ${{ github.event_name == 'pull_request' && github.event.pull_request.title || '' }}
         run: |
-          version="$(echo "$VERSION" | tr -d '[:space:]')"
+          release_name="$(echo "$RELEASE_NAME" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
 
-          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Version must use the X.Y.Z format, for example 1.4.0."
+          if [ -z "$release_name" ]; then
+            release_name="${SOURCE_BRANCH#*/}"
+          fi
+
+          if [ -z "$release_name" ] || [ "$release_name" = "$SOURCE_BRANCH" ]; then
+            release_name="$SOURCE_TITLE"
+          fi
+
+          safe_name="$(echo "$release_name" \
+            | tr '[:upper:] ' '[:lower:]-' \
+            | sed -E 's/[^a-z0-9._-]+/-/g; s/-+/-/g; s/^-//; s/-$//')"
+
+          if [ -z "$safe_name" ]; then
+            echo "::error::Release name could not be derived from the merged branch or PR title."
             exit 1
           fi
 
           {
-            echo "version=$version"
-            echo "branch=release/$version"
-            echo "title=Release: $version"
+            echo "name=$release_name"
+            echo "branch=release/$safe_name"
+            echo "title=Release: $release_name"
           } >> "$GITHUB_OUTPUT"
 
       - name: Ensure no other active release exists
@@ -58,7 +88,7 @@ jobs:
           script: |
             const { owner, repo } = context.repo;
             const releaseBranch = process.env.RELEASE_BRANCH;
-            const releaseBranchPattern = /^release\/\d+\.\d+\.\d+$/;
+            const releaseBranchPattern = /^release\/.+$/;
 
             const pulls = await github.paginate(github.rest.pulls.list, {
               owner,
@@ -103,15 +133,20 @@ jobs:
 
       - name: Create or update draft PR to main
         uses: actions/github-script@v7
+        env:
+          RELEASE_NAME: ${{ steps.release.outputs.name }}
+          RELEASE_BRANCH: ${{ steps.release.outputs.branch }}
+          RELEASE_TITLE: ${{ steps.release.outputs.title }}
         with:
           github-token: ${{ secrets.RELEASE_BOT_TOKEN || github.token }}
           script: |
             const { owner, repo } = context.repo;
-            const version = '${{ steps.release.outputs.version }}';
-            const releaseBranch = '${{ steps.release.outputs.branch }}';
-            const title = '${{ steps.release.outputs.title }}';
-            const body = [
-              `Release ${version} cut from develop.`,
+            const releaseName = process.env.RELEASE_NAME;
+            const releaseBranch = process.env.RELEASE_BRANCH;
+            const title = process.env.RELEASE_TITLE;
+            const sourcePr = context.payload.pull_request;
+            const body = sourcePr?.body || [
+              `Release ${releaseName} cut from develop.`,
               '',
               'This draft PR represents the stabilization window for this version.',
               'Only fixes for this version should be added to the release branch.'
