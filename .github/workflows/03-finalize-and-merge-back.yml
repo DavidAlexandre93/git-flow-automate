@@ -38,24 +38,89 @@ jobs:
         env:
           RELEASE_BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
-          version="${RELEASE_BRANCH#release/}"
+          release_name="${RELEASE_BRANCH#release/}"
 
-          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Release branch must use release/X.Y.Z, for example release/1.4.0."
+          if [ -z "$release_name" ] || [ "$release_name" = "$RELEASE_BRANCH" ]; then
+            echo "::error::Release branch must start with release/, for example release/login-flow."
+            exit 1
+          fi
+
+          safe_name="$(echo "$release_name" \
+            | tr '[:upper:] ' '[:lower:]-' \
+            | sed -E 's/[^a-z0-9._-]+/-/g; s/-+/-/g; s/^-//; s/-$//')"
+
+          if [ -z "$safe_name" ]; then
+            echo "::error::Release branch name could not be converted into a safe merge-back branch name."
             exit 1
           fi
 
           {
-            echo "version=$version"
-            echo "tag=v$version"
-            echo "merge_back_branch=merge-back/release-$version"
-            echo "merge_back_title=Merge back: Release $version"
+            echo "release_branch=$RELEASE_BRANCH"
+            echo "release_name=$release_name"
+            echo "merge_back_branch=merge-back/release-$safe_name"
+            echo "merge_back_title=Merge back: Release $release_name"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Resolve final version from release candidate
+        id: final_version
+        uses: actions/github-script@v7
+        env:
+          RELEASE_BRANCH: ${{ steps.release.outputs.release_branch }}
+        with:
+          github-token: ${{ secrets.RELEASE_BOT_TOKEN || github.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const releaseBranch = process.env.RELEASE_BRANCH;
+            const rcTagPattern = /^v(\d+)\.(\d+)\.(\d+)-rc\.(\d+)$/;
+
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner,
+              repo,
+              per_page: 100,
+            });
+
+            const candidates = releases
+              .filter((release) => release.prerelease)
+              .filter((release) => release.target_commitish === releaseBranch)
+              .map((release) => {
+                const match = release.tag_name.match(rcTagPattern);
+
+                if (!match) {
+                  return null;
+                }
+
+                return {
+                  tag: release.tag_name,
+                  version: `${match[1]}.${match[2]}.${match[3]}`,
+                  major: Number(match[1]),
+                  minor: Number(match[2]),
+                  patch: Number(match[3]),
+                  rc: Number(match[4]),
+                };
+              })
+              .filter(Boolean)
+              .sort((left, right) =>
+                left.major - right.major ||
+                left.minor - right.minor ||
+                left.patch - right.patch ||
+                left.rc - right.rc
+              );
+
+            const latestCandidate = candidates[candidates.length - 1];
+
+            if (!latestCandidate) {
+              core.setFailed(`No release candidate found for ${releaseBranch}. Create an RC before merging this release to main.`);
+              return;
+            }
+
+            core.setOutput('version', latestCandidate.version);
+            core.setOutput('tag', `v${latestCandidate.version}`);
+            core.info(`Final version resolved from ${latestCandidate.tag}: ${latestCandidate.version}`);
 
       - name: Create final release tag
         shell: bash
         run: |
-          final_tag="${{ steps.release.outputs.tag }}"
+          final_tag="${{ steps.final_version.outputs.tag }}"
 
           git fetch origin "+refs/heads/main:refs/remotes/origin/main"
           git checkout -B main origin/main
@@ -69,15 +134,20 @@ jobs:
 
       - name: Create or update GitHub release
         uses: actions/github-script@v7
+        env:
+          FINAL_VERSION: ${{ steps.final_version.outputs.version }}
+          FINAL_TAG: ${{ steps.final_version.outputs.tag }}
+          RELEASE_BRANCH: ${{ steps.release.outputs.release_branch }}
         with:
           github-token: ${{ secrets.RELEASE_BOT_TOKEN || github.token }}
           script: |
             const { owner, repo } = context.repo;
-            const version = '${{ steps.release.outputs.version }}';
-            const finalTag = '${{ steps.release.outputs.tag }}';
+            const version = process.env.FINAL_VERSION;
+            const finalTag = process.env.FINAL_TAG;
+            const releaseBranch = process.env.RELEASE_BRANCH;
             const sourcePr = context.payload.pull_request;
             const name = `Release ${finalTag}`;
-            const body = sourcePr.body || `Release ${version} finalized from ${sourcePr.head.ref}.`;
+            const body = sourcePr.body || `Release ${version} finalized from ${releaseBranch}.`;
 
             try {
               const existingRelease = await github.rest.repos.getReleaseByTag({
@@ -296,7 +366,7 @@ jobs:
               per_page: 100,
             });
 
-            const releaseBranchPattern = /^release\/\d+\.\d+\.\d+$/;
+            const releaseBranchPattern = /^release\/.+$/;
             const activeReleasePulls = pulls
               .filter((pull) => pull.head.repo?.full_name === `${owner}/${repo}`)
               .filter((pull) => releaseBranchPattern.test(pull.head.ref))
