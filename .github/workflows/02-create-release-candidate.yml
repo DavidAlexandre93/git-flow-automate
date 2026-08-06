@@ -7,6 +7,10 @@ on:
         description: Release version, for example 1.4.0
         required: true
         type: string
+      release_branch:
+        description: Active release branch, for example release/login-flow
+        required: true
+        type: string
       rc_number:
         description: Release candidate number, for example 1
         required: true
@@ -37,13 +41,25 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ inputs.version }}
+          RELEASE_BRANCH: ${{ inputs.release_branch }}
           RC_NUMBER: ${{ inputs.rc_number }}
         run: |
           version="$(echo "$VERSION" | tr -d '[:space:]')"
+          release_branch="$(echo "$RELEASE_BRANCH" | tr -d '[:space:]')"
           rc_number="$(echo "$RC_NUMBER" | tr -d '[:space:]')"
 
           if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Version must use the X.Y.Z format, for example 1.4.0."
+            exit 1
+          fi
+
+          if ! [[ "$release_branch" =~ ^release/.+ ]]; then
+            echo "::error::Release branch must start with release/, for example release/login-flow."
+            exit 1
+          fi
+
+          if ! git check-ref-format --branch "$release_branch"; then
+            echo "::error::Release branch is not a valid git branch name."
             exit 1
           fi
 
@@ -55,7 +71,7 @@ jobs:
           {
             echo "version=$version"
             echo "number=$rc_number"
-            echo "branch=release/$version"
+            echo "branch=$release_branch"
             echo "tag=v$version-rc.$rc_number"
           } >> "$GITHUB_OUTPUT"
 
@@ -118,6 +134,7 @@ jobs:
                 owner,
                 repo,
                 release_id: existingRelease.data.id,
+                target_commitish: releaseBranch,
                 name,
                 body,
                 prerelease: true,
