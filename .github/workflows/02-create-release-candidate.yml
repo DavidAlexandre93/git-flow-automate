@@ -15,6 +15,20 @@ on:
         description: Release candidate number, for example 1
         required: true
         type: string
+  workflow_call:
+    inputs:
+      version:
+        description: Release version, for example 1.4.0
+        required: true
+        type: string
+      release_branch:
+        description: Active release branch, for example release/login-flow
+        required: true
+        type: string
+      rc_number:
+        description: Release candidate number, for example 1
+        required: true
+        type: string
 
 permissions:
   contents: write
