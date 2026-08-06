@@ -4,4 +4,4 @@ Arquivo criado para versionamento e testes do fluxo Git Flow.
 
 ## Versao de teste
 
-v0.1.11
+v0.1.13
