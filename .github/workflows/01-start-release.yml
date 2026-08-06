@@ -7,6 +7,15 @@ on:
         description: Release branch description, for example login-flow
         required: true
         type: string
+      version:
+        description: Optional version for the first release candidate, for example 1.4.0. If empty, README.md is used.
+        required: false
+        type: string
+      rc_number:
+        description: First release candidate number
+        required: false
+        default: "1"
+        type: string
   pull_request:
     types:
       - closed
@@ -32,6 +41,10 @@ jobs:
         )
       )
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      release_branch: ${{ steps.release.outputs.branch }}
+      rc_number: ${{ steps.release.outputs.rc_number }}
 
     steps:
       - name: Checkout develop
@@ -51,6 +64,8 @@ jobs:
         shell: bash
         env:
           RELEASE_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.release_name || '' }}
+          VERSION_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.version || '' }}
+          RC_NUMBER_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.rc_number || '1' }}
           SOURCE_BRANCH: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || '' }}
           SOURCE_TITLE: ${{ github.event_name == 'pull_request' && github.event.pull_request.title || '' }}
         run: |
@@ -73,10 +88,36 @@ jobs:
             exit 1
           fi
 
+          version="$(echo "$VERSION_INPUT" | tr -d '[:space:]')"
+          version="${version#v}"
+
+          if [ -z "$version" ]; then
+            version="$(sed -nE 's/.*v?([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' README.md | head -n 1)"
+          fi
+
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version must use the X.Y.Z format, for example 1.4.0. Provide it manually or keep a vX.Y.Z entry in README.md."
+            exit 1
+          fi
+
+          rc_number="$(echo "$RC_NUMBER_INPUT" | tr -d '[:space:]')"
+
+          if [ -z "$rc_number" ]; then
+            rc_number="1"
+          fi
+
+          if ! [[ "$rc_number" =~ ^[0-9]+$ ]]; then
+            echo "::error::Release candidate number must be an integer, for example 1."
+            exit 1
+          fi
+
           {
             echo "name=$release_name"
             echo "branch=release/$safe_name"
             echo "title=Release: $release_name"
+            echo "version=$version"
+            echo "rc_number=$rc_number"
+            echo "rc_tag=v$version-rc.$rc_number"
           } >> "$GITHUB_OUTPUT"
 
       - name: Ensure no other active release exists
@@ -184,3 +225,13 @@ jobs:
             });
 
             core.info(`Release draft PR created: #${createdPull.data.number}`);
+
+  create-initial-release-candidate:
+    name: Create initial release candidate
+    needs: start-release
+    uses: ./.github/workflows/02-create-release-candidate.yml
+    with:
+      version: ${{ needs.start-release.outputs.version }}
+      release_branch: ${{ needs.start-release.outputs.release_branch }}
+      rc_number: ${{ needs.start-release.outputs.rc_number }}
+    secrets: inherit
