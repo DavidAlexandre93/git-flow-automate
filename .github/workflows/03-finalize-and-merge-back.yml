@@ -274,16 +274,39 @@ jobs:
         env:
           HOTFIX_BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
-          version="${HOTFIX_BRANCH#hotfix/}"
+          hotfix_name="${HOTFIX_BRANCH#hotfix/}"
+
+          if [ -z "$hotfix_name" ] || [ "$hotfix_name" = "$HOTFIX_BRANCH" ]; then
+            echo "::error::Hotfix branch must start with hotfix/, for example hotfix/login-fix or hotfix/1.4.1."
+            exit 1
+          fi
+
+          safe_name="$(echo "$hotfix_name" \
+            | tr '[:upper:] ' '[:lower:]-' \
+            | sed -E 's/[^a-z0-9._-]+/-/g; s/-+/-/g; s/^-//; s/-$//')"
+
+          if [ -z "$safe_name" ]; then
+            echo "::error::Hotfix branch name could not be converted into a safe merge-back branch name."
+            exit 1
+          fi
+
+          version_candidate="${hotfix_name#v}"
+
+          if [[ "$version_candidate" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            version="$version_candidate"
+          else
+            version="$(sed -nE 's/.*v?([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' README.md | head -n 1)"
+          fi
 
           if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Hotfix branch must use hotfix/X.Y.Z, for example hotfix/1.4.1."
+            echo "::error::Version must use the X.Y.Z format, for example 1.4.1. Use a hotfix/X.Y.Z branch or keep a vX.Y.Z entry in README.md."
             exit 1
           fi
 
           {
+            echo "name=$hotfix_name"
             echo "version=$version"
-            echo "safe_name=$version"
+            echo "safe_name=$safe_name"
             echo "tag=v$version"
           } >> "$GITHUB_OUTPUT"
 
@@ -401,6 +424,7 @@ jobs:
         id: merge_back
         shell: bash
         env:
+          HOTFIX_NAME: ${{ steps.hotfix.outputs.name }}
           HOTFIX_VERSION: ${{ steps.hotfix.outputs.version }}
           HOTFIX_SAFE_NAME: ${{ steps.hotfix.outputs.safe_name }}
           TARGET_BASE: ${{ steps.hotfix_target.outputs.base_branch }}
@@ -412,10 +436,10 @@ jobs:
 
           if [ "$TARGET_KIND" = "release" ]; then
             merge_back_branch="merge-back/hotfix-$HOTFIX_SAFE_NAME-to-$safe_target"
-            merge_back_title="Merge back: Hotfix $HOTFIX_VERSION into $TARGET_BASE"
+            merge_back_title="Merge back: Hotfix $HOTFIX_NAME into $TARGET_BASE"
           else
             merge_back_branch="merge-back/hotfix-$HOTFIX_SAFE_NAME-to-develop"
-            merge_back_title="Merge back: Hotfix $HOTFIX_VERSION"
+            merge_back_title="Merge back: Hotfix $HOTFIX_NAME"
           fi
 
           {
